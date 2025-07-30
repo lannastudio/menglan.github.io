@@ -1,6 +1,250 @@
 ---
 layout: post
-title:  "objc4源码阅读——Weak"
-date:   2025-06-30 12:00:00 +0800
-categories: iOS原理
+title: "Objective-C __weak 弱引用实现原理深度解析"
+date: 2025-07-30 09:00:00 +0800
+categories: iOS 底层
+tags: [Objective-C, Runtime, weak, 内存管理]
 ---
+
+# Objective-C `__weak` 弱引用实现原理深度解析
+
+## 1. `objc_initWeak`
+
+```objc
+__weak Object *obj = foo;
+obj = bar;
+````
+
+* 第一行代码会被 Clang 编译器解析为 `objc_initWeak(&obj, foo);`
+* 第二行代码会被 Clang 编译器解析为 `objc_storeWeak(&obj, bar);`
+
+```objc
+id objc_initWeak(id *location, id newObj)
+{
+    if (!newObj) {
+        *location = nil;
+        return nil;
+    }
+
+    return storeWeak<DontHaveOld, DoHaveNew, DoCrashIfDeallocating>
+        (location, (objc_object*)newObj);
+}
+```
+
+* `initWeak` 很简单，判断新值是不是 nil，然后调用 `storeWeak`。
+* 和直接调用 `storeWeak` 的区别在于，`haveOld` 不同：
+
+  * `initWeak` 调用时 `haveOld == false`
+  * `storeWeak` 时 `haveOld == true`
+* C++ 模板函数声明，这三个参数都是编译器常量，会进行 CPU 条件预测优化。
+
+---
+
+## 2. `objc_storeWeak`
+
+```objc
+enum CrashIfDeallocating {
+    DontCrashIfDeallocating = false, DoCrashIfDeallocating = true
+};
+template<HaveOld haveOld, HaveNew haveNew, enum CrashIfDeallocating crashIfDeallocating>
+static id storeWeak(id *location, objc_object *newObj)
+{
+    // ...省略部分实现
+}
+```
+
+**核心流程与注释：**
+
+* 创建 `oldTable` 和 `newTable` 自动变量，分别管理旧对象和新对象的 SideTable。
+* 对 `oldTable` 和 `newTable` 加锁，防止竞态。
+* 判断 isa 指针是否初始化完成（`+initialize` 流程），防止死锁。
+* 如果 `haveOld`，解绑。
+* 有新值，则注册新对象进 SideTable。
+* 发送对象被设置为 weak 的通知。
+
+---
+
+## 3. SideTable
+
+```cpp
+struct SideTable {
+    spinlock_t slock;
+    RefcountMap refcnts;
+    weak_table_t weak_table;
+    // ...
+};
+```
+
+* 三个字段分别是：自旋锁，引用计数的哈希表，weak 引用关系的全局表。
+
+**StripedMap 原理：**
+
+```cpp
+template<typename T>
+class StripedMap {
+    enum { StripeCount = 8 }; // iOS 下为8
+    PaddedT array[StripeCount];
+    static unsigned int indexForPointer(const void *p) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+        return ((addr >> 4) ^ (addr >> 9)) % StripeCount;
+    }
+public:
+    T& operator[] (const void *p) { 
+        return array[indexForPointer(p)].value; 
+    }
+};
+```
+
+* StripedMap：分片数组，对象指针映射到不同的 SideTable 分片，提升并发性能。
+
+---
+
+### 3.1 SideTable 相关理解
+
+* `oldTable = &SideTables()[oldObj];`
+  作用是：**把 oldObj 作为 key，从 StripedMap 拿到其所在分片的 SideTable 的引用**。
+
+* `weak_register_no_lock(&newTable->weak_table, (id)newObj, location, ...)`
+  根据 newObj 注册 weak。
+
+#### StripedMap 分片意义
+
+1. 多个对象分布到不同 SideTable 分片，**实现高并发隔离**。
+2. 锁只需加在单个分片，减少锁竞争。
+
+#### RefcountMap
+
+* 记录扩展引用计数（超出 isa bits 承载时，或者 has\_assoc 等特殊情况）。
+* weak 对象的创建**不会增加引用计数**，只是 weak\_table 维护映射。
+
+#### weak\_table\_t 与 weak\_entry\_t
+
+```cpp
+struct weak_table_t {
+    weak_entry_t *weak_entries;
+    size_t num_entries;
+    uintptr_t mask;
+    uintptr_t max_hash_displacement;
+};
+struct weak_entry_t {
+    DisguisedPtr<objc_object> referent;
+    union {
+        struct {
+            weak_referrer_t *referrers;
+            uintptr_t out_of_line_ness : 2;
+            uintptr_t num_refs : PTR_MINUS_2;
+            uintptr_t mask;
+            uintptr_t max_hash_displacement;
+        };
+        struct {
+            weak_referrer_t inline_referrers[WEAK_INLINE_COUNT];
+        };
+    };
+    // ...
+};
+```
+
+* `weak_table_t`：SideTable 里用于存储 weak 引用关系的哈希表。
+* `weak_entry_t`：一组指向同一个对象的所有 weak 指针的集合。
+
+**举例：**
+
+* 对象 A 有 4 个 `__weak` 指针，weak\_table\_t 里有一个指向 A 的 weak\_entry\_t。
+* weak\_entry\_t 的 referrers 记录这 4 个 weak 指针的地址。
+* A 被释放时，遍历 referrers，把所有指针置为 nil。
+
+---
+
+## 4. `weak_unregister_no_lock`
+
+```cpp
+void weak_unregister_no_lock(weak_table_t *weak_table, id referent_id, id *referrer_id)
+{
+    objc_object *referent = (objc_object *)referent_id;
+    objc_object **referrer = (objc_object **)referrer_id;
+
+    weak_entry_t *entry;
+
+    if (!referent) return;
+
+    if ((entry = weak_entry_for_referent(weak_table, referent))) {
+        remove_referrer(entry, referrer);
+        // ...省略判断是否清空 entry
+        if (empty) {
+            weak_entry_remove(weak_table, entry);
+        }
+    }
+    // 不要在这里置 *referrer = nil
+}
+```
+
+* 根据对象地址找到 entry，再在 entry 的 referrer 列表中移除当前 weak 变量的地址。
+* 如果 entry 没有 referrers 了，则删除 entry 本身。
+
+---
+
+## 5. `weak_register_no_lock`
+
+```cpp
+id weak_register_no_lock(weak_table_t *weak_table, id referent_id, id *referrer_id, WeakRegisterDeallocatingOptions deallocatingOptions)
+{
+    objc_object *referent = (objc_object *)referent_id;
+    objc_object **referrer = (objc_object **)referrer_id;
+
+    if (_objc_isTaggedPointerOrNil(referent)) return referent_id;
+    // ...检测对象状态
+    // 创建/查找 entry，追踪 referent 对象
+    if ((entry = weak_entry_for_referent(weak_table, referent))) {
+        append_referrer(entry, referrer);
+    } else {
+        weak_entry_t new_entry(referent, referrer);
+        weak_grow_maybe(weak_table);
+        weak_entry_insert(weak_table, &new_entry);
+    }
+    return referent_id;
+}
+```
+
+* 对 TaggedPointer 等特殊对象不做 weak 管理。
+* 检查对象状态，注册 entry，并追踪 weak 映射。
+
+---
+
+## 6. 总结
+
+* weak 有两种创建方式：**首次赋值**（`initWeak`），**普通赋值**（`storeWeak`）
+* storeWeak 负责和 +initialize 流程避免死锁
+* SideTable 用 StripedMap 分片优化并发
+* SideTable 维护多个哈希表，其中 weak\_entry\_t 哈希表专门存储 weak 映射
+* weak\_entry\_t 追踪所有指向同一对象的 weak 指针地址
+* register/unregister 负责映射的创建和删除
+
+---
+
+## 7. 指针、对象地址、SideTable 和 weak\_entry\_t 的关系
+
+```objc
+NSObject *objc = [[NSObject alloc] init];
+```
+
+* obj 是指向 objc\_object 的指针，存储着对象的地址。
+* weak\_unregister\_no\_lock 负责根据对象地址，从全局 StripedMap 的 SideTable 分片里找到 entry，并移除/清理 referrer。
+* entry 为空时自动删除该 entry，释放内存资源。
+
+---
+
+## 参考资料
+
+* [weak弱引用的实现方式](https://www.desgard.com/iOS-Source-Probe/Objective-C/Runtime/weak%20%E5%BC%B1%E5%BC%95%E7%94%A8%E7%9A%84%E5%AE%9E%E7%8E%B0%E6%96%B9%E5%BC%8F.html)
+
+---
+
+> 如果你需要更精细的代码高亮、目录折叠、或者想要进一步拆解成多级小节，也可以继续提需求！
+> 也可以直接贴到 `_posts/2025-07-30-objc-weak.md` 作为一篇高质量底层源码博客。
+
+```
+
+---
+
+如有特殊格式需求、目录、美化或加入图片/公式/多语言解释等，都可以随时补充说明！
+```
