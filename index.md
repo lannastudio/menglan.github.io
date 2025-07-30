@@ -2,7 +2,7 @@
 layout: default
 ---
 
-## 文章分类目录
+## 欢迎👏👏👏👏
 
 {% assign categories = site.categories | sort %}
 <ul>
