@@ -1,8 +1,9 @@
 ---
 layout: default
+title: 梦岚的个人博客
 ---
 
-## 欢迎👏👏👏👏
+## 欢迎👏👏👏
 
 {% assign categories = site.categories | sort %}
 <ul>
@@ -12,7 +13,7 @@ layout: default
       <ul>
         {% for post in category[1] %}
           <li>
-          <a href="{{ site.baseurl }}{{ post.url }}">{{ post.title }}</a>
+            <a href="{{ site.baseurl }}{{ post.url }}">{{ post.title }}</a>
             <span style="color:#999;">({{ post.date | date: "%Y-%m-%d" }})</span>
           </li>
         {% endfor %}
