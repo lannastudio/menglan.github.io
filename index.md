@@ -12,7 +12,7 @@ layout: default
       <ul>
         {% for post in category[1] %}
           <li>
-            <a href="{{ post.url }}">{{ post.title }}</a>
+          <a href="{{ site.baseurl }}{{ post.url }}">{{ post.title }}</a>
             <span style="color:#999;">({{ post.date | date: "%Y-%m-%d" }})</span>
           </li>
         {% endfor %}
