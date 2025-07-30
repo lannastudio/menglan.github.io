@@ -4,6 +4,7 @@ title: 梦岚的个人博客
 ---
 
 ## 欢迎👏👏👏
+博客内容全部为原创，参考文献会在文章中标注
 
 {% assign categories = site.categories | sort %}
 <ul>
