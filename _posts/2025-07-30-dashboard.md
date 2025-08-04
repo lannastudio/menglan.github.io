@@ -11,6 +11,8 @@ categories: 项目
 
 在这篇博客中，详细介绍了dashboard架构初期的思考，但是有的代码随着项目的改进已经有所变化，因为时间有限，无法对博客进行优化了，还请各位面试官见谅
 
+具体代码可以查看[dashboard项目地址](https://github.com/lannastudio/XMDashboard)
+
 ## 问题
 阅读博客后发现一些问题，虽然有的在项目中暂时还没有修正
 
