@@ -14,7 +14,7 @@ categories: 项目
 具体代码可以查看[dashboard项目地址](https://github.com/lannastudio/XMDashboard)
 
 ## 问题
-阅读博客后发现一些问题，虽然有的在项目中暂时还没有修正
+阅读博客后发现一些问题，有的在项目中暂时还没有修正
 
 1. ComponentFactory初始化数据结构不应该使用+initialize，在我的博客KVO实验一文中提到，+initialize并不总是只被调用一次，KVO就会让+initialize再次调用，所以在这里初始化_factory是不合适的
 2. Obsersvable添加观察的类型应该改成NS_OPTIONS，这个问题在项目中已经修正
